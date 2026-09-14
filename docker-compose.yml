@@ -1,0 +1,28 @@
+services:
+  # 静态 Web：宿主端口可用 WEB_PORT 覆盖，默认 8080
+  web:
+    build:
+      context: .
+      target: web
+    image: elevator-braille-web:latest
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # 一次性验收服务：Vitest 映射/整批测试 + Playwright 键盘操作 E2E，结束即退出
+  verify:
+    build:
+      context: .
+      target: verify
+    image: elevator-braille-verify:latest
+    profiles: ["verify"]
+    environment:
+      PLAYWRIGHT_BASE_URL: http://web:80
+      CI: "1"
+    depends_on:
+      web:
+        condition: service_healthy
