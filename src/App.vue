@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { buildCopyText, checkFloors, sortFloors } from './braille'
 import type { FloorOrder } from './braille'
 import BrailleCellSvg from './components/BrailleCellSvg.vue'
@@ -20,6 +20,27 @@ const orderedFloors = computed(() =>
 )
 const copyText = computed(() => buildCopyText(orderedFloors.value))
 
+// 复制反馈的自动消退计时器；连续复制时以最近一次为准重新计时
+let copyResetTimer: number | undefined
+
+// 输入或排列一旦变化，复制内容即与已复制文本不同：
+// 旧的“已复制/失败”反馈不再成立，回到未复制状态并取消消退计时
+watch(copyText, () => {
+  if (copyResetTimer !== undefined) {
+    window.clearTimeout(copyResetTimer)
+    copyResetTimer = undefined
+  }
+  copyState.value = 'idle'
+})
+
+function scheduleCopyReset(): void {
+  if (copyResetTimer !== undefined) window.clearTimeout(copyResetTimer)
+  copyResetTimer = window.setTimeout(() => {
+    copyState.value = 'idle'
+    copyResetTimer = undefined
+  }, 2000)
+}
+
 function splitNonEmpty(text: string): string[] {
   return text.split(/\r\n|\r|\n/).filter((line) => line !== '')
 }
@@ -39,17 +60,15 @@ async function copyResult(): Promise<void> {
     document.body.appendChild(ta)
     ta.select()
     try {
-      document.execCommand('copy')
-      copyState.value = 'ok'
+      // execCommand 以布尔返回值报告成败，失败时不会抛错
+      copyState.value = document.execCommand('copy') ? 'ok' : 'fail'
     } catch {
       copyState.value = 'fail'
     } finally {
       document.body.removeChild(ta)
     }
   }
-  window.setTimeout(() => {
-    copyState.value = 'idle'
-  }, 2000)
+  scheduleCopyReset()
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -101,7 +120,10 @@ function onKeydown(event: KeyboardEvent): void {
           data-testid="copy-message"
           >已复制，内容与预览一致</span
         >
-        <span v-else-if="copyState === 'fail'" class="copy-msg copy-fail"
+        <span
+          v-else-if="copyState === 'fail'"
+          class="copy-msg copy-fail"
+          data-testid="copy-fail-message"
           >复制失败，请手动选择文本</span
         >
       </div>

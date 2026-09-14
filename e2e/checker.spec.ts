@@ -166,6 +166,77 @@ test.describe('整批失败', () => {
   })
 })
 
+test.describe('复制反馈状态', () => {
+  test('复制后切换排列，旧的复制成功提示立即失效', async ({ page }) => {
+    await gotoApp(page)
+    await page.getByTestId('floor-input').fill('2\nB1\n10\nB9\n1')
+    await page.getByTestId('copy-btn').click()
+    await expect(page.getByTestId('copy-message')).toBeVisible()
+
+    // 预览已按楼层顺序重排，但当前排列尚未复制：成功提示必须立即消失
+    // （一次性断言，不等 2 秒自动消退，否则无法区分“切换失效”与“计时消退”）
+    await page.getByTestId('order-floor').check()
+    expect(await page.getByTestId('copy-message').count()).toBe(0)
+
+    // 切回输入顺序也不会恢复旧提示
+    await page.getByTestId('order-input').check()
+    expect(await page.getByTestId('copy-message').count()).toBe(0)
+  })
+
+  test('复制后修改输入内容，旧的复制成功提示同样失效', async ({ page }) => {
+    await gotoApp(page)
+    await page.getByTestId('floor-input').fill(SAMPLE)
+    await page.getByTestId('copy-btn').click()
+    await expect(page.getByTestId('copy-message')).toBeVisible()
+
+    await page.getByTestId('floor-input').fill('1\n2')
+    expect(await page.getByTestId('copy-message').count()).toBe(0)
+  })
+
+  test('剪贴板接口被拒绝且降级复制返回失败时，显示复制失败提示', async ({
+    page,
+  }) => {
+    await gotoApp(page)
+    await page.getByTestId('floor-input').fill(SAMPLE)
+
+    // 模拟裸 http 部署：clipboard 接口被拒绝，execCommand 降级也返回失败
+    await page.evaluate(() => {
+      Object.defineProperty(navigator.clipboard, 'writeText', {
+        value: () =>
+          Promise.reject(new DOMException('denied', 'NotAllowedError')),
+        configurable: true,
+      })
+      document.execCommand = () => false
+    })
+
+    await page.getByTestId('copy-btn').click()
+    await expect(page.getByTestId('copy-fail-message')).toBeVisible()
+    await expect(page.getByTestId('copy-message')).toHaveCount(0)
+  })
+
+  test('连续复制时，成功提示从最近一次复制起完整保留两秒', async ({ page }) => {
+    await gotoApp(page)
+    await page.getByTestId('floor-input').fill(SAMPLE)
+    const msg = page.getByTestId('copy-message')
+
+    await page.getByTestId('copy-btn').click()
+    await expect(msg).toBeVisible()
+
+    // 约 1 秒后再次复制
+    await page.waitForTimeout(1000)
+    await page.getByTestId('copy-btn').click()
+    await expect(msg).toBeVisible()
+
+    // 距第二次复制约 1.2 秒（距首次约 2.2 秒）：
+    // 首次操作的消退计时不得提前清除本次提示
+    await page.waitForTimeout(1200)
+    await expect(msg).toBeVisible()
+
+    // 距第二次复制满 2 秒后提示才消退
+    await expect(msg).toHaveCount(0, { timeout: 2500 })
+  })
+})
+
 test.describe('键盘操作与复制一致性', () => {
   test('Ctrl+Enter 复制的内容与预览逐行一致', async ({ page, context }) => {
     await gotoApp(page)
