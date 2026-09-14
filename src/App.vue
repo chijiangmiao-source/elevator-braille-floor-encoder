@@ -1,8 +1,20 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { buildCopyText, checkFloors, sortFloors } from './braille'
-import type { FloorOrder } from './braille'
+import type { EncodedFloor, FloorOrder } from './braille'
+import {
+  REVIEW_STATUS_TEXT,
+  createLocalStorageReviewStorage,
+  floorReviewStatus,
+  restoreProgress,
+  serializeProgress,
+  setCellDots,
+  summarizeReview,
+  toggleDot,
+} from './review'
+import type { ReviewProgress } from './review'
 import BrailleCellSvg from './components/BrailleCellSvg.vue'
+import ReviewCell from './components/ReviewCell.vue'
 
 const input = ref('')
 const copyState = ref<'idle' | 'ok' | 'fail'>('idle')
@@ -19,6 +31,93 @@ const orderedFloors = computed(() =>
   result.value.ok ? sortFloors(result.value.floors, order.value) : [],
 )
 const copyText = computed(() => buildCopyText(orderedFloors.value))
+
+/* ------------------------------------------------------------------ */
+/* 实物逐点复核：独立复核领域模型 + localStorage 持久化                  */
+/* ------------------------------------------------------------------ */
+
+// 复核进度：楼层代码 + 单元序号为键，与展示顺序无关
+const progress = ref<ReviewProgress>({})
+const reviewMode = ref(false)
+// 存储内容损坏 / 版本不识别 / 与当前批次不匹配时的可见提示
+const storageNotice = ref<string | null>(null)
+const reviewStorage = createLocalStorageReviewStorage()
+
+// 当前合法批次的指纹（代码 + 每码单元数）；非法或空批次为 null
+const batchFingerprint = computed(() =>
+  result.value.ok && result.value.floors.length
+    ? result.value.floors.map((f) => `${f.code}:${f.cells.length}`).join('|')
+    : null,
+)
+
+function persistProgress(floors: readonly EncodedFloor[]): void {
+  reviewStorage.save(serializeProgress(floors, progress.value))
+}
+
+// 合法批次一旦确定（含离开页面后重新输入同一代码批次），即从存储服务恢复进度：
+// 损坏 / 版本不识别 → 放弃该份进度并提示；部分记录与当前批次不匹配 →
+// 仅恢复代码与单元结构完全一致的记录，其余放弃并提示。
+// 复核状态绝不参与编码计算，编码预览不受任何存储内容影响。
+watch(
+  batchFingerprint,
+  (fingerprint) => {
+    if (fingerprint === null) return
+    const floors = result.value.ok ? result.value.floors : []
+    const restored = restoreProgress(reviewStorage.read(), floors)
+    if (restored.kind === 'empty') {
+      progress.value = {}
+      storageNotice.value = null
+      return
+    }
+    if (restored.kind === 'discarded') {
+      progress.value = {}
+      storageNotice.value =
+        restored.reason === 'version'
+          ? '本地复核进度版本不识别，已放弃该份进度，可重新逐点复核。'
+          : '本地复核进度已损坏，无法恢复，已放弃该份进度，可重新逐点复核。'
+      // 覆盖无法识别的内容，避免每次进入都重复提示
+      persistProgress(floors)
+      return
+    }
+    progress.value = restored.progress
+    if (restored.dropped.length > 0) {
+      storageNotice.value = `部分复核进度与当前批次不匹配（${restored.dropped.join('、')}），已放弃不匹配的记录。`
+      // 放弃不匹配部分：写回清理后的进度
+      persistProgress(floors)
+    } else {
+      storageNotice.value = null
+    }
+  },
+  { immediate: true },
+)
+
+// 每次实测变更立即持久化（仅当前批次合法时）
+watch(progress, () => {
+  if (batchFingerprint.value === null) return
+  persistProgress(result.value.ok ? result.value.floors : [])
+})
+
+// 复核面板行：跟随当前排列顺序展示，记录始终按楼层代码绑定
+const reviewRows = computed(() =>
+  orderedFloors.value.map((floor) => ({
+    floor,
+    record: progress.value[floor.code] as ReviewProgress[string] | undefined,
+    status: floorReviewStatus(floor, progress.value[floor.code]),
+  })),
+)
+const reviewSummary = computed(() =>
+  summarizeReview(orderedFloors.value, progress.value),
+)
+
+function onToggleDot(code: string, cellIndex: number, dot: number): void {
+  const current = progress.value[code]?.[cellIndex] ?? []
+  progress.value = setCellDots(
+    progress.value,
+    code,
+    cellIndex,
+    toggleDot(current, dot),
+  )
+}
 
 // 复制反馈的自动消退计时器；连续复制时以最近一次为准重新计时
 let copyResetTimer: number | undefined
@@ -205,6 +304,75 @@ function onKeydown(event: KeyboardEvent): void {
         <summary>复制内容预览（制表符分隔）</summary>
         <pre data-testid="copy-preview">{{ copyText }}</pre>
       </details>
+      <div class="review-entry">
+        <button
+          type="button"
+          class="primary-btn"
+          data-testid="review-toggle"
+          @click="reviewMode = !reviewMode"
+        >
+          {{ reviewMode ? '退出实物逐点复核' : '进入实物逐点复核' }}
+        </button>
+        <span v-if="!reviewMode" class="review-entry-hint">
+          拿到实物标牌后，逐格录入摸到的凸点，系统即时比对缺失点与多余点
+        </span>
+      </div>
+
+      <div
+        v-if="reviewMode"
+        class="review-panel"
+        data-testid="review-panel"
+      >
+        <h2>实物逐点复核（点击圆点切换实测凸点）</h2>
+        <p
+          v-if="storageNotice"
+          class="storage-notice"
+          data-testid="storage-notice"
+          role="alert"
+        >
+          {{ storageNotice }}
+        </p>
+        <p class="review-summary" data-testid="review-summary">
+          待核对 <strong data-testid="count-pending">{{ reviewSummary.pending }}</strong>
+          · 吻合 <strong data-testid="count-match">{{ reviewSummary.match }}</strong>
+          · 不吻合 <strong data-testid="count-mismatch">{{ reviewSummary.mismatch }}</strong>
+        </p>
+        <div
+          v-for="row in reviewRows"
+          :key="row.floor.code"
+          class="review-row"
+          data-testid="review-row"
+          :data-code="row.floor.code"
+        >
+          <div class="review-row-head">
+            <span class="col-code">{{ row.floor.code }}</span>
+            <span class="col-braille">{{ row.floor.braille }}</span>
+            <span
+              class="review-status"
+              data-testid="review-status"
+              :data-status="row.status"
+              :class="`status-${row.status}`"
+              >{{ REVIEW_STATUS_TEXT[row.status] }}</span
+            >
+          </div>
+          <div class="review-cells">
+            <span
+              v-for="(cell, idx) in row.floor.cells"
+              :key="idx"
+              class="review-cell-pair"
+            >
+              <BrailleCellSvg :dots="cell.dots" :role-label="cell.role" />
+              <ReviewCell
+                :expected="cell.dots"
+                :actual="row.record?.[idx]"
+                :cell-index="idx"
+                :role-label="cell.role"
+                @toggle="(dot) => onToggleDot(row.floor.code, idx, dot)"
+              />
+            </span>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section v-else class="empty-tip">
@@ -390,6 +558,86 @@ h2 {
   border-radius: 8px;
   font-size: 12px;
   overflow-x: auto;
+}
+.review-entry {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.review-entry-hint {
+  color: #666;
+  font-size: 13px;
+}
+.review-panel {
+  margin-top: 14px;
+  border: 1px solid #d6d8de;
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px 18px 18px;
+}
+.review-panel h2 {
+  margin: 0 0 10px;
+}
+.storage-notice {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border: 1px solid #e0c34b;
+  border-left: 4px solid #d9a800;
+  border-radius: 6px;
+  background: #fdf8e7;
+  color: #6b5300;
+  font-size: 13px;
+}
+.review-summary {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: #444;
+}
+.review-summary strong {
+  font-variant-numeric: tabular-nums;
+}
+.review-row {
+  border-top: 1px solid #eceef2;
+  padding: 12px 0;
+}
+.review-row-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.review-status {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 999px;
+}
+.status-pending {
+  background: #eceef2;
+  color: #555;
+}
+.status-match {
+  background: #e3f4e8;
+  color: #1a7f37;
+}
+.status-mismatch {
+  background: #fdecea;
+  color: #c0392b;
+}
+.review-cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.review-cell-pair {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px dashed #d6d8de;
+  border-radius: 8px;
 }
 .empty-tip {
   margin-top: 24px;
