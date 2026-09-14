@@ -39,6 +39,92 @@ test.describe('合法批次：墨字 / Unicode 盲文 / SVG 六点并排显示',
   })
 })
 
+test.describe('输入顺序／楼层顺序切换', () => {
+  const MIXED = '2\nB1\n10\nB9\n1'
+  const INPUT_CODES = ['2', 'B1', '10', 'B9', '1']
+  const FLOOR_CODES = ['B9', 'B1', '1', '2', '10']
+  const FLOOR_LINES = ['4', '2', '5', '1', '3']
+
+  function rowCodes(page: import('@playwright/test').Page) {
+    return page.getByTestId('result-row').locator('.col-code').allInnerTexts()
+  }
+
+  test('切换楼层顺序后表格与复制内容一致，切回输入顺序立即恢复', async ({
+    page,
+  }) => {
+    await gotoApp(page)
+    // 默认保持输入顺序
+    await expect(page.getByTestId('order-input')).toBeChecked()
+
+    await page.getByTestId('floor-input').fill(MIXED)
+    expect(await rowCodes(page)).toEqual(INPUT_CODES)
+
+    // 切到楼层顺序：B9→B1 在前，1→99 升序在后，原行号仍指向粘贴文本
+    await page.getByTestId('order-floor').check()
+    expect(await rowCodes(page)).toEqual(FLOOR_CODES)
+    await expect(page.locator('.col-line')).toHaveText(FLOOR_LINES)
+
+    // 复制内容与楼层顺序的表格逐行一致
+    await page.getByTestId('copy-btn').click()
+    await expect(page.getByTestId('copy-message')).toBeVisible()
+    const clipboard = await page.evaluate(() => navigator.clipboard.readText())
+    const preview =
+      (await page.getByTestId('copy-preview').textContent()) ?? ''
+    expect(clipboard).toBe(preview.trim())
+    expect(clipboard.split('\n').map((line) => line.split('\t')[0])).toEqual(
+      FLOOR_CODES,
+    )
+
+    // 切回输入顺序：表格与复制内容立即恢复原排列
+    await page.getByTestId('order-input').check()
+    expect(await rowCodes(page)).toEqual(INPUT_CODES)
+    await page.getByTestId('copy-btn').click()
+    const clipboardBack = await page.evaluate(() =>
+      navigator.clipboard.readText(),
+    )
+    expect(
+      clipboardBack.split('\n').map((line) => line.split('\t')[0]),
+    ).toEqual(INPUT_CODES)
+  })
+
+  test('刷新页面后回到默认的输入顺序', async ({ page }) => {
+    await gotoApp(page)
+    await page.getByTestId('floor-input').fill(MIXED)
+    await page.getByTestId('order-floor').check()
+    expect(await rowCodes(page)).toEqual(FLOOR_CODES)
+
+    await page.reload()
+    await page.getByTestId('floor-input').waitFor()
+    await expect(page.getByTestId('order-input')).toBeChecked()
+    await page.getByTestId('floor-input').fill(MIXED)
+    expect(await rowCodes(page)).toEqual(INPUT_CODES)
+  })
+
+  test('非法与重复仍按输入位置报告首个问题，与排序选项无关', async ({
+    page,
+  }) => {
+    await gotoApp(page)
+    await page.getByTestId('order-floor').check()
+
+    await page.getByTestId('floor-input').fill('1\n100\nB1')
+    const panel = page.getByTestId('error-panel')
+    await expect(panel).toBeVisible()
+    await expect(panel).toContainText('第 2 行')
+    await expect(panel.getByTestId('error-code')).toHaveText('100')
+    await expect(page.getByTestId('result-panel')).toHaveCount(0)
+
+    // 重复代码：报告重复行与首次出现行，仍取输入位置
+    await page.getByTestId('floor-input').fill('B2\n1\nB2')
+    await expect(panel).toContainText('第 3 行')
+    await expect(panel).toContainText('第 1 行')
+    await expect(page.getByTestId('result-panel')).toHaveCount(0)
+
+    // 修正后结果按当前选中的楼层顺序出现
+    await page.getByTestId('floor-input').fill('B2\n1\nB1')
+    expect(await rowCodes(page)).toEqual(['B2', 'B1', '1'])
+  })
+})
+
 test.describe('整批失败', () => {
   test('非法代码：不生成任何结果并定位首个问题行与原因', async ({ page }) => {
     await gotoApp(page)

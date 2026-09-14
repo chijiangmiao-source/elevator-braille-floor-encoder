@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   BrailleCell,
+  EncodedFloor,
   buildCopyText,
   checkFloors,
   dotsToChar,
   encodeFloor,
+  sortFloors,
   splitLines,
 } from './braille'
 
@@ -165,6 +167,47 @@ describe('buildCopyText 复制内容与预览一致', () => {
     if (!r.ok) throw new Error('批次应合法')
     const text = buildCopyText(r.floors)
     expect(text).toBe('1\t⠼⠁\t3456 1\nB1\t⠠⠃⠼⠁\t6 12 3456 1')
+  })
+})
+
+describe('sortFloors 楼层顺序', () => {
+  function codesOf(floors: readonly EncodedFloor[]): string[] {
+    return floors.map((f) => f.code)
+  }
+
+  function floorsOf(text: string): EncodedFloor[] {
+    const r = checkFloors(text)
+    if (!r.ok) throw new Error(`批次应合法: ${JSON.stringify(r)}`)
+    return r.floors
+  }
+
+  it('地下层按 B9 → B1 排在最前（编号大者先到达）', () => {
+    const sorted = sortFloors(floorsOf('B2\nB9\nB1\nB5'), 'floor')
+    expect(codesOf(sorted)).toEqual(['B9', 'B5', 'B2', 'B1'])
+  })
+
+  it('地上层 1 → 99 按数值升序，两位数不按字典序（2 在 10 前）', () => {
+    const sorted = sortFloors(floorsOf('10\n2\n99\n1\n9'), 'floor')
+    expect(codesOf(sorted)).toEqual(['1', '2', '9', '10', '99'])
+  })
+
+  it('混合批次顺序确定：B9→B1 之后接 1→99，原行号随对象移动', () => {
+    const floors = floorsOf('2\nB1\n10\nB9\n1')
+    const sorted = sortFloors(floors, 'floor')
+    expect(codesOf(sorted)).toEqual(['B9', 'B1', '1', '2', '10'])
+    expect(sorted.map((f) => f.line)).toEqual([4, 2, 5, 1, 3])
+    // 排序只重排已编码对象，盲文串与对象引用保持不变
+    expect(sorted[0]).toBe(floors[3])
+    expect(sorted[0].braille).toBe('⠠⠃⠼⠊')
+  })
+
+  it('不修改输入数组，输入顺序模式保持原排列', () => {
+    const floors = floorsOf('2\nB1\n10')
+    const before = codesOf(floors)
+    const sorted = sortFloors(floors, 'floor')
+    expect(sorted).not.toBe(floors)
+    expect(codesOf(floors)).toEqual(before)
+    expect(codesOf(sortFloors(floors, 'input'))).toEqual(['2', 'B1', '10'])
   })
 })
 

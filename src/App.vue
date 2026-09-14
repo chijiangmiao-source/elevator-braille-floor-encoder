@@ -1,18 +1,24 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { buildCopyText, checkFloors } from './braille'
+import { buildCopyText, checkFloors, sortFloors } from './braille'
+import type { FloorOrder } from './braille'
 import BrailleCellSvg from './components/BrailleCellSvg.vue'
 
 const input = ref('')
 const copyState = ref<'idle' | 'ok' | 'fail'>('idle')
+// 结果排列：默认输入顺序；刷新或经链接进入时同样回到输入顺序
+const order = ref<FloorOrder>('input')
 
 const sample = '1\n2\n10\nB1'
 
 const result = computed(() => checkFloors(input.value))
 const hasInput = computed(() => splitNonEmpty(input.value).length > 0)
-const copyText = computed(() =>
-  result.value.ok ? buildCopyText(result.value.floors) : '',
+// 预览、Unicode 盲文、六点 SVG 与复制文本共用同一份有序结果；
+// 排序只重排已编码对象，不重新解释或改写代码
+const orderedFloors = computed(() =>
+  result.value.ok ? sortFloors(result.value.floors, order.value) : [],
 )
+const copyText = computed(() => buildCopyText(orderedFloors.value))
 
 function splitNonEmpty(text: string): string[] {
   return text.split(/\r\n|\r|\n/).filter((line) => line !== '')
@@ -99,6 +105,34 @@ function onKeydown(event: KeyboardEvent): void {
           >复制失败，请手动选择文本</span
         >
       </div>
+      <div
+        class="order-switch"
+        data-testid="order-switch"
+        role="radiogroup"
+        aria-label="结果排列顺序"
+      >
+        <span class="order-label">结果排列：</span>
+        <label>
+          <input
+            v-model="order"
+            type="radio"
+            name="floor-order"
+            value="input"
+            data-testid="order-input"
+          />
+          输入顺序
+        </label>
+        <label>
+          <input
+            v-model="order"
+            type="radio"
+            name="floor-order"
+            value="floor"
+            data-testid="order-floor"
+          />
+          楼层顺序（B9→B1、1→99）
+        </label>
+      </div>
     </section>
 
     <section v-if="hasInput && !result.ok" class="error-panel" data-testid="error-panel" role="alert">
@@ -124,7 +158,7 @@ function onKeydown(event: KeyboardEvent): void {
           <span role="columnheader">每格六点示意（从左到右）</span>
         </div>
         <div
-          v-for="floor in result.floors"
+          v-for="floor in orderedFloors"
           :key="floor.code"
           class="result-row"
           role="row"
@@ -212,6 +246,22 @@ textarea:focus {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+.order-switch {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 14px;
+}
+.order-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.order-label {
+  color: #555;
 }
 button {
   font-size: 14px;

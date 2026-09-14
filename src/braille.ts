@@ -170,6 +170,36 @@ export function checkFloors(text: string): BatchResult {
   return { ok: true, floors }
 }
 
+/** 结果排列方式：输入顺序（默认）或楼层顺序 */
+export type FloorOrder = 'input' | 'floor'
+
+/**
+ * 楼层顺序比较：地下层整体在前（B9 → B1，编号大者先到达），
+ * 随后地上层 1 → 99 按数值升序。
+ */
+function compareByFloor(a: EncodedFloor, b: EncodedFloor): number {
+  if (a.isBasement !== b.isBasement) return a.isBasement ? -1 : 1
+  const na = Number(a.isBasement ? a.code.slice(1) : a.code)
+  const nb = Number(b.isBasement ? b.code.slice(1) : b.code)
+  return a.isBasement ? nb - na : na - nb
+}
+
+/**
+ * 对已编码楼层对象排序并返回新数组：
+ * - 'input'：保持输入顺序（原行序）；
+ * - 'floor'：B9 → B1、1 → 99。
+ * 只重排已有对象：不修改传入数组，不重新解释或改写任何代码，
+ * 各对象的原始行号随对象一起移动。
+ */
+export function sortFloors(
+  floors: readonly EncodedFloor[],
+  order: FloorOrder,
+): EncodedFloor[] {
+  const sorted = [...floors]
+  if (order === 'floor') sorted.sort(compareByFloor)
+  return sorted
+}
+
 /**
  * 复制用纯文本：每行“墨字代码 ⇥ Unicode 盲文串 ⇥ 各格点位”，
  * 其中第三列是每格六点示意的文本化（如 “3456 1”），与预览逐格一致。
