@@ -2,6 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { buildCopyText, checkFloors, sortFloors } from './braille'
 import type { EncodedFloor, FloorOrder } from './braille'
+import { VIEW_SIDE_TEXT, projectDots } from './projection'
+import type { ViewSide } from './projection'
 import {
   REVIEW_STATUS_TEXT,
   createLocalStorageReviewStorage,
@@ -15,11 +17,14 @@ import {
 import type { ReviewProgress } from './review'
 import BrailleCellSvg from './components/BrailleCellSvg.vue'
 import ReviewCell from './components/ReviewCell.vue'
+import DotPositionLegend from './components/DotPositionLegend.vue'
 
 const input = ref('')
 const copyState = ref<'idle' | 'ok' | 'fail'>('idle')
 // 结果排列：默认输入顺序；刷新或经链接进入时同样回到输入顺序
 const order = ref<FloorOrder>('input')
+// 点位观察方向：默认成品阅读面；刷新、重新输入或出现非法批次时回到该默认值
+const viewSide = ref<ViewSide>('front')
 
 const sample = '1\n2\n10\nB1'
 
@@ -31,6 +36,53 @@ const orderedFloors = computed(() =>
   result.value.ok ? sortFloors(result.value.floors, order.value) : [],
 )
 const copyText = computed(() => buildCopyText(orderedFloors.value))
+
+/* ------------------------------------------------------------------ */
+/* 点位观察方向（成品阅读面 / 背面施工面）：仅显示投影，不改写编码        */
+/* ------------------------------------------------------------------ */
+
+interface DisplayCell {
+  /** 当前观察方向下落在物理槽位上的显示点号（投影结果） */
+  readonly displayDots: readonly number[]
+  /** 编码原始点号（标题/标注与复核始终使用它） */
+  readonly sourceDots: readonly number[]
+  readonly role: string
+  /** 无法投影的点号在此给出可见错误，而不是静默画出错误孔位 */
+  readonly error: string | null
+}
+
+// 投影只作用于单格内部点号；楼层排列与格子先后随 orderedFloors 保持不变
+const displayFloors = computed(() =>
+  orderedFloors.value.map((floor) => ({
+    floor,
+    cells: floor.cells.map((cell): DisplayCell => {
+      try {
+        return {
+          displayDots: projectDots(cell.dots, viewSide.value),
+          sourceDots: cell.dots,
+          role: cell.role,
+          error: null,
+        }
+      } catch (err) {
+        return {
+          displayDots: [],
+          sourceDots: cell.dots,
+          role: cell.role,
+          error: err instanceof Error ? err.message : '点位投影失败',
+        }
+      }
+    }),
+  })),
+)
+
+const isMirroredView = computed(() => viewSide.value === 'back')
+
+// 重新输入（输入文本变化）或出现非法批次时回到成品阅读面。
+// 单纯切换观察方向不改变 input，不会触发本监听；切换排列也不影响方向。
+// 刷新时 viewSide 以初始值 'front' 挂载，天然回到默认阅读面。
+watch(input, () => {
+  viewSide.value = 'front'
+})
 
 /* ------------------------------------------------------------------ */
 /* 实物逐点复核：独立复核领域模型 + localStorage 持久化                  */
@@ -98,13 +150,18 @@ watch(progress, () => {
 })
 
 // 复核面板行：跟随当前排列顺序展示，记录始终按楼层代码绑定
-const reviewRows = computed(() =>
-  orderedFloors.value.map((floor) => ({
+const reviewRows = computed(() => {
+  // 观察方向投影只作用于参考 SVG；复核录入、差异判断与存储均用原始点号
+  const displayByCode = new Map(
+    displayFloors.value.map((entry) => [entry.floor.code, entry.cells]),
+  )
+  return orderedFloors.value.map((floor) => ({
     floor,
+    displayCells: displayByCode.get(floor.code) ?? [],
     record: progress.value[floor.code] as ReviewProgress[string] | undefined,
     status: floorReviewStatus(floor, progress.value[floor.code]),
-  })),
-)
+  }))
+})
 const reviewSummary = computed(() =>
   summarizeReview(orderedFloors.value, progress.value),
 )
@@ -271,31 +328,66 @@ function onKeydown(event: KeyboardEvent): void {
 
     <section v-else-if="result.ok && result.floors.length" data-testid="result-panel">
       <h2>核对预览（墨字 ⇄ Unicode 盲文 ⇄ 每格六点）</h2>
+      <div
+        class="view-switch"
+        data-testid="view-switch"
+        role="radiogroup"
+        aria-label="点位观察方向"
+      >
+        <span class="order-label">点位视图：</span>
+        <label>
+          <input
+            v-model="viewSide"
+            type="radio"
+            name="view-side"
+            value="front"
+            data-testid="view-front"
+          />
+          成品阅读面
+        </label>
+        <label>
+          <input
+            v-model="viewSide"
+            type="radio"
+            name="view-side"
+            value="back"
+            data-testid="view-back"
+          />
+          背面施工面（透明板背面镜像孔位）
+        </label>
+      </div>
+      <DotPositionLegend :side="viewSide" />
       <div class="result-table" role="table" aria-label="楼层盲文核对结果">
         <div class="result-row result-head" role="row">
           <span role="columnheader">原行</span>
           <span role="columnheader">墨字</span>
           <span role="columnheader">Unicode 盲文串</span>
-          <span role="columnheader">每格六点示意（从左到右）</span>
+          <span role="columnheader">
+            每格六点示意（从左到右 · 当前：{{ VIEW_SIDE_TEXT[viewSide] }}）
+          </span>
         </div>
         <div
-          v-for="floor in orderedFloors"
-          :key="floor.code"
+          v-for="entry in displayFloors"
+          :key="entry.floor.code"
           class="result-row"
           role="row"
           data-testid="result-row"
+          :data-view="viewSide"
         >
-          <span class="col-line" role="cell">{{ floor.line }}</span>
-          <span class="col-code" role="cell">{{ floor.code }}</span>
+          <span class="col-line" role="cell">{{ entry.floor.line }}</span>
+          <span class="col-code" role="cell">{{ entry.floor.code }}</span>
           <span class="col-braille" role="cell" data-testid="braille-string">{{
-            floor.braille
+            entry.floor.braille
           }}</span>
           <span class="col-cells" role="cell">
             <BrailleCellSvg
-              v-for="(cell, idx) in floor.cells"
+              v-for="(cell, idx) in entry.cells"
               :key="idx"
-              :dots="cell.dots"
+              :dots="cell.displayDots"
+              :source-dots="cell.sourceDots"
+              :mirrored="isMirroredView"
               :role-label="cell.role"
+              :error="cell.error"
             />
           </span>
         </div>
@@ -324,6 +416,10 @@ function onKeydown(event: KeyboardEvent): void {
         data-testid="review-panel"
       >
         <h2>实物逐点复核（点击圆点切换实测凸点）</h2>
+        <p class="review-view-note" data-testid="review-view-note">
+          复核录入、差异判断与保存记录始终使用成品阅读面的原始点号（1-6）；
+          左侧参考图当前按「{{ VIEW_SIDE_TEXT[viewSide] }}」投影显示，仅用于观察孔位。
+        </p>
         <p
           v-if="storageNotice"
           class="storage-notice"
@@ -361,7 +457,13 @@ function onKeydown(event: KeyboardEvent): void {
               :key="idx"
               class="review-cell-pair"
             >
-              <BrailleCellSvg :dots="cell.dots" :role-label="cell.role" />
+              <BrailleCellSvg
+                :dots="row.displayCells[idx]?.displayDots ?? []"
+                :source-dots="cell.dots"
+                :mirrored="isMirroredView"
+                :role-label="cell.role"
+                :error="row.displayCells[idx]?.error ?? null"
+              />
               <ReviewCell
                 :expected="cell.dots"
                 :actual="row.record?.[idx]"
@@ -451,6 +553,25 @@ textarea:focus {
   cursor: pointer;
 }
 .order-label {
+  color: #555;
+}
+.view-switch {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  margin-top: 14px;
+}
+.view-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.review-view-note {
+  margin: 0 0 10px;
+  font-size: 12px;
   color: #555;
 }
 button {
